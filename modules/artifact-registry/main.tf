@@ -35,3 +35,18 @@ resource "google_artifact_registry_repository" "docker" {
     }
   }
 }
+
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
+# WHY: GKE Autopilot nodes authenticate to Artifact Registry as the default Compute
+# Engine service account. Newer GCP projects no longer grant that account roles/editor,
+# so without an explicit reader binding on this repository every image pull returns 403.
+resource "google_artifact_registry_repository_iam_member" "node_puller" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.docker.location
+  repository = google_artifact_registry_repository.docker.name
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+}

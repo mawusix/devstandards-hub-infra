@@ -201,7 +201,7 @@ jobs:
             --set image.digest="$IMAGE_DIGEST" \
             --set app.version="$APP_VERSION" \
             --set commitSha="$COMMIT_SHA" \
-            --wait --atomic --timeout 5m --history-max 10
+            --wait --atomic --timeout 10m --history-max 10
 
       # WHY `if: failure()`: only runs when the step above failed — i.e. --atomic just
       # auto-rolled back. `helm upgrade` on its own gives no indication in the log that
