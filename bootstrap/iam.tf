@@ -48,6 +48,19 @@ resource "google_service_account_iam_member" "ci_app_wif" {
   depends_on = [google_iam_workload_identity_pool_provider.github_actions]
 }
 
+# WHY a second binding rather than relying on workloadIdentityUser alone: the
+# google-github-actions/auth external-account flow performs an extra impersonation hop
+# to mint an access token, which requires token-creator on the target SA.
+# workloadIdentityUser authorises the federation itself but not that hop. Note the
+# denial surfaces as a token-refresh/connection error in gcloud, not a clean 403.
+resource "google_service_account_iam_member" "ci_app_token_creator" {
+  service_account_id = google_service_account.ci_app.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "principalSet://iam.googleapis.com/${local.wif_pool_resource}/attribute.repository/${local.ci_app_repo}"
+
+  depends_on = [google_iam_workload_identity_pool_provider.github_actions]
+}
+
 resource "google_project_iam_member" "ci_app_artifactregistry_writer" {
   project = var.project_id
   role    = "roles/artifactregistry.writer"
@@ -72,6 +85,14 @@ resource "google_service_account" "ci_infra" {
 resource "google_service_account_iam_member" "ci_infra_wif" {
   service_account_id = google_service_account.ci_infra.name
   role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${local.wif_pool_resource}/attribute.repository/${local.ci_infra_repo}"
+
+  depends_on = [google_iam_workload_identity_pool_provider.github_actions]
+}
+
+resource "google_service_account_iam_member" "ci_infra_token_creator" {
+  service_account_id = google_service_account.ci_infra.name
+  role               = "roles/iam.serviceAccountTokenCreator"
   member             = "principalSet://iam.googleapis.com/${local.wif_pool_resource}/attribute.repository/${local.ci_infra_repo}"
 
   depends_on = [google_iam_workload_identity_pool_provider.github_actions]
