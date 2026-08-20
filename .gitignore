@@ -1,9 +1,0 @@
-.terraform/
-.terraform.lock.hcl   # see below
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-tfplan
-*.tfplan
-crash.log

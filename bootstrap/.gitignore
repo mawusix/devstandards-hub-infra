@@ -1,4 +1,5 @@
 # Terraform state - local backend here, and it can contain secrets in plaintext
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 
@@ -8,6 +9,7 @@
 # Ignore override files as they may contain sensitive data, such as passwords or private keys
 *.tfvars
 tfplan
+*.tfplan
 
 # Crash logs
 crash.log
