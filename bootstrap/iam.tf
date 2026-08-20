@@ -30,7 +30,7 @@ resource "google_service_account" "ci_app" {
 
 resource "google_service_account_iam_member" "ci_app_wif" {
   service_account_id = google_service_account.ci_app.name
-  role                = "roles/iam.workloadIdentityUser"
+  role               = "roles/iam.workloadIdentityUser"
 
   # WHY principalSet on attribute.repository, not a principal:// on one subject: the
   # GitHub OIDC subject claim is scoped to the triggering ref, not just the repo —
@@ -71,8 +71,8 @@ resource "google_service_account" "ci_infra" {
 
 resource "google_service_account_iam_member" "ci_infra_wif" {
   service_account_id = google_service_account.ci_infra.name
-  role                = "roles/iam.workloadIdentityUser"
-  member              = "principalSet://iam.googleapis.com/${local.wif_pool_resource}/attribute.repository/${local.ci_infra_repo}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${local.wif_pool_resource}/attribute.repository/${local.ci_infra_repo}"
 
   depends_on = [google_iam_workload_identity_pool_provider.github_actions]
 }

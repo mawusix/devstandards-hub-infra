@@ -13,7 +13,7 @@ resource "google_billing_budget" "monthly" {
     # WHY scoped to this one project: the billing account could in principle have other
     # projects on it later. Scoping the filter means this alert always tracks
     # devops-bpp's spend specifically, not the whole account's.
-    projects = ["projects/${data.google_project.this.number}"]
+    projects               = ["projects/${data.google_project.this.number}"]
     credit_types_treatment = "EXCLUDE_ALL_CREDITS"
   }
 

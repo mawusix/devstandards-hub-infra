@@ -5,17 +5,17 @@
 # its first `terraform apply` on a "service not enabled" error.
 locals {
   bootstrap_apis = [
-    "container.googleapis.com",         # GKE Autopilot cluster (modules/, later)
-    "artifactregistry.googleapis.com",  # container image repo (modules/, later)
-    "compute.googleapis.com",           # VPC/subnets/firewall (modules/, later)
-    "iam.googleapis.com",               # service accounts + IAM bindings (this directory)
-    "iamcredentials.googleapis.com",    # WIF token exchange / SA impersonation
-    "sts.googleapis.com",               # WIF OIDC token exchange
+    "container.googleapis.com",            # GKE Autopilot cluster (modules/, later)
+    "artifactregistry.googleapis.com",     # container image repo (modules/, later)
+    "compute.googleapis.com",              # VPC/subnets/firewall (modules/, later)
+    "iam.googleapis.com",                  # service accounts + IAM bindings (this directory)
+    "iamcredentials.googleapis.com",       # WIF token exchange / SA impersonation
+    "sts.googleapis.com",                  # WIF OIDC token exchange
     "cloudresourcemanager.googleapis.com", # project-level IAM bindings
-    "monitoring.googleapis.com",        # Cloud Monitoring (platform/, later)
-    "logging.googleapis.com",           # Cloud Logging (platform/, later)
-    "secretmanager.googleapis.com",     # app secrets (platform/, later)
-    "billingbudgets.googleapis.com",    # the budget resource below
+    "monitoring.googleapis.com",           # Cloud Monitoring (platform/, later)
+    "logging.googleapis.com",              # Cloud Logging (platform/, later)
+    "secretmanager.googleapis.com",        # app secrets (platform/, later)
+    "billingbudgets.googleapis.com",       # the budget resource below
   ]
 }
 
