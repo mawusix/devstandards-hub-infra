@@ -121,14 +121,53 @@ jobs:
           echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
 
-      # WHY `helm rollback` with no explicit revision number: the default targets the
-      # immediately preceding revision, i.e. "one step back" — the same "previous
-      # known-good" semantics as the brief asks for. `helm history` right after is the
-      # audit trail: what this release's revision list looked like at the moment of
-      # rollback, independent of anything derived below.
+      # WHY the target revision is resolved explicitly instead of letting `helm
+      # rollback` default to "one step back": that default is the immediately
+      # preceding revision number, not the last revision that actually worked. After
+      # an `--atomic` auto-rollback (or any sequence containing a failed upgrade),
+      # the revision immediately before the current one can itself be the FAILED
+      # release — rolling back to it just redeploys the same broken release and
+      # times out, turning a recovery action into a second outage. Instead, walk
+      # `helm history` and pick the newest revision, other than the current one,
+      # whose status is "deployed" or "superseded" (i.e. it actually ran
+      # successfully at some point). "current" is the highest revision number in the
+      # history — revision numbers are strictly increasing, so that always
+      # identifies what's live right now regardless of its own status.
+      - name: Resolve target revision for rollback
+        id: target
+        run: |
+          history=$(helm history "$RELEASE" -n "$NAMESPACE" -o json)
+          current=$(jq '[.[].revision] | max' <<< "$history")
+          target=$(jq --argjson current "$current" '
+            [.[] | select(.revision != $current) | select(.status == "deployed" or .status == "superseded")]
+            | sort_by(.revision) | last
+          ' <<< "$history")
+
+          if [[ -z "$target" || "$target" == "null" ]]; then
+            echo "::error::No healthy prior revision found for release \"$RELEASE\" in namespace \"$NAMESPACE\" — every revision other than the current one (#$current) is failed, pending, or absent. Refusing to guess a rollback target."
+            exit 1
+          fi
+
+          revision=$(jq -r '.revision' <<< "$target")
+          app_version=$(jq -r '.app_version' <<< "$target")
+
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Rollback target resolved"
+            echo
+            echo "Rolling \`$RELEASE\` in \`$NAMESPACE\` back to revision **$revision** (app version"
+            echo "\`$app_version\`) — the newest revision other than the current one (#$current) with"
+            echo "status \`deployed\` or \`superseded\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # WHY `helm history` right after: the audit trail — what this release's
+      # revision list looked like at the moment of rollback, independent of anything
+      # derived above.
       - name: helm rollback
         run: |
-          helm rollback "$RELEASE" -n "$NAMESPACE" --wait --timeout 5m
+          helm rollback "$RELEASE" "${{ steps.target.outputs.revision }}" -n "$NAMESPACE" --wait --timeout 5m
           helm history "$RELEASE" -n "$NAMESPACE"
 
       - name: Capture restored (good) release info
