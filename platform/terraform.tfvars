@@ -1,1 +1,1 @@
-project_id         = "devops-bpp"
+project_id = "devops-bpp"
