@@ -73,7 +73,7 @@ helm template devstandards-hub . -f values-prod.yaml --namespace prod
 ## The digest-promotion model
 
 The app repo's CI builds one image per commit, pushes it once to Artifact Registry
-(`europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub`), and dispatches its digest
+(`europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub/app`), and dispatches its digest
 to this repo. Every environment then runs that **exact same digest** — "build once,
 deploy many" — never a per-environment rebuild, and never a mutable tag that could
 point at different bytes by the time it's pulled:

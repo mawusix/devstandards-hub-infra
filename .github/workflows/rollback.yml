@@ -44,13 +44,47 @@ jobs:
       CLUSTER_NAME: devstandards-hub
       NAMESPACE: ${{ inputs.environment }}
       RELEASE: devstandards-hub
-      IMAGE_REPOSITORY: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
       # WHY this repo, not one derived from a variable: the app repo is fixed —
       # bootstrap/iam.tf's ci_app_repo local hardcodes the same
       # "${var.github_owner}/devstandards-hub" pairing this project has always used.
       APP_REPO: mawusix/devstandards-hub
       USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
     steps:
+      # WHY checkout is needed here even though this job never deploys anything from the
+      # repo: the step below reads image.repository straight out of
+      # helm/devstandards-hub/values.yaml, which only exists once the repo is checked
+      # out.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # WHY read from the chart instead of hardcoding a copy here: image.repository is a
+      # property of the deployment artefact, defined once in
+      # helm/devstandards-hub/values.yaml. Duplicating it into this workflow's env: block
+      # (as used to be the case) creates copies that can silently drift from the chart —
+      # a mismatch surfaces late, as ImagePullBackOff or as the semver-tag checks below
+      # silently finding no tags for a repository nothing was ever pushed to.
+      #
+      # WHY this still isn't the single source of truth end-to-end: platform/ (Terraform)
+      # separately produces this same registry URL as the artifact_registry_url output
+      # when it provisions the Artifact Registry repo. Flowing that Terraform output into
+      # the chart, so values.yaml itself is generated rather than hand-maintained, is the
+      # fully correct fix — out of scope here. This step only collapses the
+      # workflow-side duplication (three copies down to two: Terraform and the chart).
+      - name: Resolve IMAGE_REPOSITORY from the chart
+        run: |
+          repo=$(python3 -c '
+          import yaml
+          with open("helm/devstandards-hub/values.yaml") as f:
+              data = yaml.safe_load(f)
+          print((data.get("image") or {}).get("repository") or "")
+          ')
+          if [[ -z "$repo" ]]; then
+            echo "::error::image.repository is empty or missing in helm/devstandards-hub/values.yaml — refusing to proceed with an empty IMAGE_REPOSITORY."
+            exit 1
+          fi
+          echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
+          echo "Resolved IMAGE_REPOSITORY=$repo"
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:

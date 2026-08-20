@@ -80,7 +80,6 @@ jobs:
       CLUSTER_NAME: devstandards-hub
       NAMESPACE: ${{ github.event.inputs.environment || 'int' }}
       RELEASE: devstandards-hub
-      IMAGE_REPOSITORY: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
       IMAGE_DIGEST: ${{ github.event.inputs.image_digest || github.event.client_payload.image_digest }}
       APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version || '0.0.0-unknown' }}
       COMMIT_SHA: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || '' }}
@@ -92,6 +91,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # WHY read from the chart instead of hardcoding a copy here: image.repository is a
+      # property of the deployment artefact, defined once in
+      # helm/devstandards-hub/values.yaml. Duplicating it into this workflow's env: block
+      # (as used to be the case) creates copies that can silently drift from the chart —
+      # a mismatch surfaces late, as ImagePullBackOff or as the semver promotion guard
+      # below silently finding no tags for a repository nothing was ever pushed to.
+      #
+      # WHY this still isn't the single source of truth end-to-end: platform/ (Terraform)
+      # separately produces this same registry URL as the artifact_registry_url output
+      # when it provisions the Artifact Registry repo. Flowing that Terraform output into
+      # the chart, so values.yaml itself is generated rather than hand-maintained, is the
+      # fully correct fix — out of scope here. This step only collapses the
+      # workflow-side duplication (three copies down to two: Terraform and the chart).
+      - name: Resolve IMAGE_REPOSITORY from the chart
+        run: |
+          repo=$(python3 -c '
+          import yaml
+          with open("helm/devstandards-hub/values.yaml") as f:
+              data = yaml.safe_load(f)
+          print((data.get("image") or {}).get("repository") or "")
+          ')
+          if [[ -z "$repo" ]]; then
+            echo "::error::image.repository is empty or missing in helm/devstandards-hub/values.yaml — refusing to proceed with an empty IMAGE_REPOSITORY."
+            exit 1
+          fi
+          echo "IMAGE_REPOSITORY=$repo" >> "$GITHUB_ENV"
+          echo "Resolved IMAGE_REPOSITORY=$repo"
 
       # WHY this runs before any GCP auth or cluster access: fail fast and cheaply on a
       # malformed input, instead of authenticating, connecting to the cluster, and only

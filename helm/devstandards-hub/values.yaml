@@ -3,7 +3,7 @@
 # file's own comments for the per-environment WHY.
 
 image:
-  repository: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
+  repository: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub/app
   # WHY a placeholder digest, not empty: deploy.yml ALWAYS overrides this via
   # `--set image.digest=<validated sha256 digest>` from a workflow input it has already
   # regex-checked before this chart is ever rendered for a real deploy — this value is
