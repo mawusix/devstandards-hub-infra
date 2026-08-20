@@ -202,7 +202,7 @@ jobs:
             --set image.digest="$IMAGE_DIGEST" \
             --set app.version="$APP_VERSION" \
             --set commitSha="$COMMIT_SHA" \
-            --wait --atomic --timeout 10m --history-max 10
+            --wait --atomic --timeout 2m --history-max 10
 
       # WHY scoped to steps.helm_deploy.outcome == 'failure', not bare `if: failure()`:
       # this step exists to explain an --atomic rollback specifically. Bare failure()
