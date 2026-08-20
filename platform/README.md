@@ -99,6 +99,19 @@ terraform apply   # runs in terraform-apply.yml on push to main, behind the `pla
                    # GitHub Environment's required reviewers
 ```
 
+## Local dev setup
+
+This repo ships a `pre-push` hook (`../.githooks/pre-push`) that runs
+`terraform fmt -check -recursive` before every push — the same check
+`terraform-plan.yml` runs first, so a formatting issue fails fast locally
+instead of silently blocking the CI plan job (fmt check runs before the plan
+step, with no `continue-on-error`). `core.hooksPath` isn't tracked by git, so
+each clone needs to opt in once:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Outputs
 
 ```sh

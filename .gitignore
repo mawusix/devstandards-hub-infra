@@ -1,9 +1,18 @@
+# Terraform
 .terraform/
-.terraform.lock.hcl   # see below
 *.tfstate
 *.tfstate.*
 *.tfvars
-!*.tfvars.example
+!platform/terraform.tfvars
 tfplan
 *.tfplan
+*.tfplan.binary
 crash.log
+crash.*.log
+override.tf
+override_*.tf
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

@@ -19,4 +19,6 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - run: gcloud auth list
-      - run: gcloud storage ls gs://devops-bpp-tfstate
+
+      - name: Verify GCP Storage Access
+        run: gcloud storage ls gs://devops-bpp-tfstate

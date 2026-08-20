@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Mirrors the "Terraform fmt check (whole repo)" step in
+# .github/workflows/terraform-plan.yml, so a badly formatted .tf/.tfvars file
+# is caught locally instead of failing CI after the push.
+set -euo pipefail
+
+if ! command -v terraform >/dev/null 2>&1; then
+  echo "pre-push: terraform not found on PATH, skipping fmt check" >&2
+  exit 0
+fi
+
+if ! terraform fmt -check -recursive; then
+  echo
+  echo "pre-push: 'terraform fmt -check -recursive' failed." >&2
+  echo "Run 'terraform fmt -recursive' to fix formatting, then commit and push again." >&2
+  exit 1
+fi
