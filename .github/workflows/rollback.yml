@@ -290,8 +290,14 @@ jobs:
       # resolved for either digest, the issue says so explicitly rather than silently
       # omitting the suspect list — the rollback has already restored service either
       # way (see the `helm rollback` step above, which already ran).
+      # WHY continue-on-error here: the rollback has already succeeded by this point
+      # (see `helm rollback` above) — this step is best-effort notification on top of
+      # a recovery that already happened. Failing the job here (a flaky `gh api` call,
+      # the app repo being unreachable, whatever) would misreport a successful
+      # recovery as a failed workflow run.
       - name: Open GitHub issue with suspect commits
         id: issue
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BAD_DIGEST: ${{ steps.bad.outputs.digest }}
@@ -312,11 +318,30 @@ jobs:
             echo "| rolled back FROM (bad) | \`$BAD_DIGEST\` | ${BAD_SHA:-_unresolved_} |"
             echo "| rolled back TO (good)  | \`$GOOD_DIGEST\` | ${GOOD_SHA:-_unresolved_} |"
             echo
+            # WHY the compare call is wrapped instead of run directly: it 404s
+            # whenever the resolved SHAs, though present, aren't commits reachable in
+            # $APP_REPO — e.g. an OCI org.opencontainers.image.revision annotation
+            # inherited from an upstream base image rather than stamped by our own
+            # build. Under this step's `set -e` (the default for `run:` blocks), an
+            # unguarded failure here would kill the step before `gh issue create`
+            # runs, silently skipping issue creation even though the rollback
+            # succeeded. Capturing the output and checking the exit code keeps that
+            # failure local to this one branch.
             if [[ -n "$BAD_SHA" && -n "$GOOD_SHA" && "$BAD_SHA" != "$GOOD_SHA" ]]; then
-              echo "Suspect commits (\`$GOOD_SHA\`...\`$BAD_SHA\`):"
-              echo
-              gh api "repos/$APP_REPO/compare/$GOOD_SHA...$BAD_SHA" \
-                --jq '.commits[] | "- " + .sha[0:7] + " " + (.commit.message | split("\n")[0]) + " (" + .commit.author.name + ")"'
+              if compare_output=$(gh api "repos/$APP_REPO/compare/$GOOD_SHA...$BAD_SHA" \
+                --jq '.commits[] | "- " + .sha[0:7] + " " + (.commit.message | split("\n")[0]) + " (" + .commit.author.name + ")"' 2>&1); then
+                echo "Suspect commits (\`$GOOD_SHA\`...\`$BAD_SHA\`):"
+                echo
+                echo "$compare_output"
+              else
+                echo "Commit provenance could not be resolved — \`$GOOD_SHA\` and \`$BAD_SHA\` were"
+                echo "found (via OCI annotation or the Deployment's fallback annotation), but"
+                echo "\`repos/$APP_REPO/compare/$GOOD_SHA...$BAD_SHA\` failed, meaning at least one of"
+                echo "them isn't a commit in \`$APP_REPO\` — most likely an OCI revision annotation"
+                echo "inherited from an upstream base image rather than stamped by this repo's own"
+                echo "build. No suspect commit range could be computed. The rollback above already"
+                echo "completed regardless."
+              fi
             else
               echo "Commit provenance could not be resolved for one or both digests — neither the"
               echo "image's \`org.opencontainers.image.revision\` OCI annotation nor the Deployment's"
@@ -346,5 +371,5 @@ jobs:
             echo "| restored digest | \`${{ steps.good.outputs.digest }}\` |"
             echo "| rolled back from digest | \`${{ steps.bad.outputs.digest }}\` |"
             echo "| promotion guard (restored release) | \`${{ steps.guard.outputs.result || 'n/a (int)' }}\` |"
-            echo "| suspect-commit issue | ${{ steps.issue.outputs.url }} |"
+            echo "| suspect-commit issue | ${{ steps.issue.outputs.url || 'failed to create — see the "Open GitHub issue with suspect commits" step' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
