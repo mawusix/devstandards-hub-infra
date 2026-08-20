@@ -194,6 +194,7 @@ jobs:
       # around per release, so `helm rollback` always has recent history to target
       # without revisions accumulating forever.
       - name: helm upgrade --install
+        id: helm_deploy
         run: |
           helm upgrade --install "$RELEASE" helm/devstandards-hub \
             --namespace "$NAMESPACE" --create-namespace \
@@ -203,13 +204,15 @@ jobs:
             --set commitSha="$COMMIT_SHA" \
             --wait --atomic --timeout 10m --history-max 10
 
-      # WHY `if: failure()`: only runs when the step above failed — i.e. --atomic just
-      # auto-rolled back. `helm upgrade` on its own gives no indication in the log that
-      # this happened; dumping history + pod state here, behind an explicit ::error::,
-      # is what turns a silent auto-rollback into something a human reviewing the run
-      # actually notices.
+      # WHY scoped to steps.helm_deploy.outcome == 'failure', not bare `if: failure()`:
+      # this step exists to explain an --atomic rollback specifically. Bare failure()
+      # also fires when an earlier step failed — e.g. the semver promotion guard above
+      # refusing to proceed — which is a different failure with a different remedy.
+      # Reporting that as "--atomic rolled back" is actively misleading, and worse,
+      # kubectl has no cluster credentials yet in that case (get-credentials never ran),
+      # so this step would just fail again while pointing at the wrong cause.
       - name: Diagnose failed deploy (atomic rollback)
-        if: failure()
+        if: failure() && steps.helm_deploy.outcome == 'failure'
         run: |
           echo "::error::helm upgrade failed and --atomic rolled '$RELEASE' back in namespace '$NAMESPACE'. Dumping history and pod state for diagnosis."
           helm history "$RELEASE" -n "$NAMESPACE" || true
