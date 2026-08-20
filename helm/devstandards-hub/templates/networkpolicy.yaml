@@ -1,0 +1,59 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "devstandards-hub.fullname" . }}
+  labels:
+    {{- include "devstandards-hub.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "devstandards-hub.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  # WHY these two ranges and nothing else: 130.211.0.0/22 and 35.191.0.0/16 are
+  # Google's documented, fixed source ranges for BOTH GCE health-check probes AND the
+  # proxied connections a GCE/GKE Ingress's HTTP(S) Load Balancer itself opens to
+  # backend Pods for real requests — end-user traffic through the Ingress arrives from
+  # these same ranges, it isn't limited to health checks. That's why prod (the only
+  # environment with an Ingress) still serves real traffic under this policy.
+  #
+  # WHY this doesn't also break this Deployment's own readiness/liveness probes:
+  # those are kubelet-initiated, from the node the Pod is scheduled on — GKE's
+  # Dataplane V2 (Cilium, what Autopilot runs) always allows kubelet health-check
+  # traffic through to a Pod regardless of NetworkPolicy, so it's exempt from this
+  # ingress restriction entirely.
+  #
+  # WHY int/pre (no Ingress at all) aren't broken either: they're reached via
+  # `kubectl port-forward`, which tunnels through the API server/kubelet straight into
+  # the Pod's network namespace rather than over the in-cluster Pod network path this
+  # policy governs — it's unaffected by it.
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 130.211.0.0/22
+        - ipBlock:
+            cidr: 35.191.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
+  # WHY egress can be locked down to DNS only: this SPA is 100% static files served by
+  # Nginx — no backend, no third-party API calls, no telemetry beacons, nothing that
+  # ever needs to reach anything else on the network. DNS is the one exception the Pod
+  # still needs for whatever name resolution Kubernetes itself relies on. Locking
+  # egress down this tightly is only possible because this specific app makes zero
+  # outbound calls of its own — a service with any real outbound dependency would need
+  # a much larger egress allowlist.
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

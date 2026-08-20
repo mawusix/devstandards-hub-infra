@@ -1,0 +1,24 @@
+devstandards-hub has been deployed to namespace "{{ .Release.Namespace }}" as release
+"{{ .Release.Name }}".
+
+  image digest : {{ .Values.image.digest }}
+  app version  : {{ .Values.app.version }}
+  replicas     : {{ .Values.replicaCount }}
+  autoscaling  : {{ if .Values.autoscaling.enabled }}on (min {{ .Values.autoscaling.minReplicas }}, max {{ .Values.autoscaling.maxReplicas }}, target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% CPU){{ else }}off{{ end }}
+{{- if .Values.ingress.enabled }}
+
+Reachable over HTTP at the reserved static IP (no TLS — see templates/ingress.yaml for
+why):
+  http://<terraform -chdir=platform output -raw ingress_ip>/
+{{- else }}
+
+No Ingress in this environment. Reach it with:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "devstandards-hub.fullname" . }} 8080:{{ .Values.service.port }}
+  then open http://localhost:8080/
+{{- end }}
+
+Check rollout status:
+  kubectl rollout status deployment/{{ include "devstandards-hub.fullname" . }} -n {{ .Release.Namespace }}
+
+Release history (what a rollback would target):
+  helm history {{ .Release.Name }} -n {{ .Release.Namespace }}

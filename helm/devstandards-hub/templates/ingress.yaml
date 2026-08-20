@@ -1,0 +1,47 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "devstandards-hub.fullname" . }}
+  labels:
+    {{- include "devstandards-hub.labels" . | nindent 4 }}
+  annotations:
+    # WHY by name, not the literal IP: this targets the address Terraform reserved
+    # (module.network's google_compute_global_address.ingress, name
+    # "devstandards-hub-vpc-ingress-ip" — see ../../modules/network/main.tf) by its
+    # resource NAME. What matters is that Helm creating/recreating this Ingress always
+    # binds the SAME reserved global address, not whichever IP a lookup happened to
+    # return.
+    kubernetes.io/ingress.global-static-ip-name: {{ .Values.ingress.staticIPName }}
+    # WHY explicit "true" rather than relying on the (also true) default: this Ingress
+    # is deliberately HTTP-only — see the no-TLS reasoning below — so this annotation
+    # states that in the manifest itself instead of depending on an unstated default.
+    kubernetes.io/ingress.allow-http: "true"
+spec:
+  # WHY ingressClassName: gce: "gce" is GKE's built-in IngressClass for the GKE
+  # Ingress-GCE controller (an external HTTP(S) Load Balancer) — the current,
+  # non-deprecated way to select it (as opposed to the older
+  # kubernetes.io/ingress.class annotation).
+  #
+  # WHY no `tls:` block, i.e. HTTP only — KNOWN LIMITATION: a Google-managed TLS
+  # certificate (via a ManagedCertificate + FrontendConfig) requires a domain this
+  # project owns, to prove domain control against. There isn't one — this app is only
+  # ever reached via the raw static IP (34.49.89.157), and a domain can't be pointed at
+  # an IP nobody owns the DNS for. Terminating TLS with a self-signed/manually-issued
+  # certificate instead would just move the trust problem to "which private CA do
+  # clients need to trust", not solve it. Traffic to this Ingress is therefore
+  # unencrypted, by necessity rather than choice. This stops being acceptable — and
+  # becomes both possible and necessary — the moment a real domain is pointed at this
+  # IP.
+  ingressClassName: gce
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "devstandards-hub.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

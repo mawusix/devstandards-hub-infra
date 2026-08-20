@@ -1,0 +1,21 @@
+# prod — namespace "prod" in the single shared cluster. Deployed by hand via
+# workflow_dispatch, behind the `prod` GitHub Environment gate (required reviewers are
+# configured on the Environment itself, not here — see terraform-apply.yml's
+# `platform` Environment for the same pattern applied to Terraform applies).
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+
+# WHY only prod gets an Ingress: exactly one global static IP is reserved for the whole
+# project (module.network's google_compute_global_address, see
+# ../../modules/network/main.tf) — not one per environment. That's deliberate: this is
+# a single shared GKE Autopilot cluster with int/pre/prod as NAMESPACES (see
+# ../../platform/README.md's "why one cluster, three namespaces" section), not one
+# cluster per environment. In a cluster-per-environment topology each cluster would
+# reserve (and pay for) its own global address and could each run its own Ingress; here
+# there's one address to go around, so it goes to the one environment that has real
+# external traffic. int and pre are reached via `kubectl port-forward` for testing
+# instead — see their values files.
+ingress:
+  enabled: true

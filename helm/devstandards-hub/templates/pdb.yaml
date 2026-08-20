@@ -1,0 +1,20 @@
+# WHY minAvailable: 1 doesn't create an eviction deadlock on int/pre (1 replica) even
+# though "1 available out of 1 total" sounds like it blocks every voluntary eviction:
+# it does block voluntary evictions (e.g. Autopilot draining a node for maintenance)
+# whenever there's genuinely only one Pod up — that's the tradeoff being made
+# deliberately here, for a demo project where a maintenance-window eviction retry is an
+# acceptable cost. What it does NOT block is a Deployment-driven rolling update (see
+# deployment.yaml's maxUnavailable: 0 / maxSurge: 1) — that always brings the
+# replacement Pod up BEFORE removing the old one, so "available" never actually drops
+# below 1 during a normal deploy or rollback.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "devstandards-hub.fullname" . }}
+  labels:
+    {{- include "devstandards-hub.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "devstandards-hub.selectorLabels" . | nindent 6 }}

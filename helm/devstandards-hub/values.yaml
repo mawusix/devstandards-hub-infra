@@ -1,0 +1,70 @@
+# Defaults shared by every environment. values-{int,pre,prod}.yaml only override what
+# genuinely differs per environment (replica count, autoscaling, ingress) — see each
+# file's own comments for the per-environment WHY.
+
+image:
+  repository: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
+  # WHY a placeholder digest, not empty: deploy.yml ALWAYS overrides this via
+  # `--set image.digest=<validated sha256 digest>` from a workflow input it has already
+  # regex-checked before this chart is ever rendered for a real deploy — this value is
+  # never used to run anything for real. It exists purely so `helm lint` and
+  # `helm template` succeed against this file with no extra flags, as a local sanity
+  # check. See templates/deployment.yaml for why the image is referenced by digest
+  # rather than by tag at all.
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+app:
+  # Semver shown in the app.kubernetes.io/version pod label, purely for a human
+  # glancing at `kubectl get pods --show-labels` — the bytes actually running are
+  # pinned by image.digest above, not by this value. Overridden via --set at deploy
+  # time, same as image.digest.
+  version: "0.0.0-unset"
+
+# WHY this and image.digest are stamped as Deployment ANNOTATIONS (see
+# templates/deployment.yaml), not just carried in CI logs: it makes
+# `kubectl describe deployment` self-documenting — anyone looking at the live workload
+# sees what's running and which commit produced it, without cross-referencing a CI run.
+# Empty by default: a manual workflow_dispatch deploy may not supply a commit SHA (it's
+# an optional input), and that must never block a deploy — see deploy.yml.
+commitSha: ""
+
+replicaCount: 1
+
+# WHY requests == limits, both ~100m CPU / 128Mi: GKE Autopilot bills per-Pod based on
+# requests and silently rounds every Pod's requests up to its own per-workload-class
+# minimums regardless of what's asked for here, so requesting less buys nothing.
+# Setting limits equal to requests instead gives the Pod Guaranteed QoS — the most
+# predictable choice for a static file server with no bursty workload shape.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+service:
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  # WHY a name, not a literal IP: the Ingress annotation below targets the reserved
+  # global address by its resource NAME (kubernetes.io/ingress.global-static-ip-name),
+  # matching modules/network's ingress_ip_name output — see templates/ingress.yaml.
+  staticIPName: devstandards-hub-vpc-ingress-ip
+
+networkPolicy:
+  enabled: true
+
+nameOverride: ""
+fullnameOverride: ""
