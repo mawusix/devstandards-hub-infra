@@ -1,0 +1,277 @@
+name: Rollback
+
+# WHY roll back rather than roll forward — safe here, would NOT be in general: this is
+# a stateless SPA with no database, no migrations, and no API contract to keep in sync
+# with a frontend version. Reverting the image is a complete revert of everything that
+# changed — there's no server-side state left in a shape only the new version
+# understands. A service with a database (a migration that already ran, a write in a
+# new format) would need a genuine roll-forward fix instead: rolling the app back while
+# the DB stays migrated forward can be worse than the outage it's meant to fix.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to roll back
+        required: true
+        type: choice
+        options: [int, pre, prod]
+
+permissions:
+  contents: read
+  id-token: write
+
+# WHY keyed on environment, cancel-in-progress FALSE: identical reasoning to
+# deploy.yml — a rollback racing a deploy (or another rollback) to the same
+# environment must queue behind it, not interrupt a `helm rollback` mid-flight.
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    # WHY the same Environment gating as deploy.yml, not skipped: rolling prod back is
+    # exactly as consequential as deploying to it — same blast radius, same "did a
+    # human sign off on this" question. Rollback getting a free pass past required
+    # reviewers just because it's "undoing" something would make the approval gate on
+    # deploy.yml pointless (anyone could always deploy-then-immediately-roll-back
+    # without ever satisfying it, since the two would be in different workflows and
+    # only one would be gated).
+    environment: ${{ inputs.environment }}
+    env:
+      PROJECT_ID: devops-bpp
+      REGION: europe-west2
+      CLUSTER_NAME: devstandards-hub
+      NAMESPACE: ${{ inputs.environment }}
+      RELEASE: devstandards-hub
+      IMAGE_REPOSITORY: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
+      # WHY this repo, not one derived from a variable: the app repo is fixed —
+      # bootstrap/iam.tf's ci_app_repo local hardcodes the same
+      # "${var.github_owner}/devstandards-hub" pairing this project has always used.
+      APP_REPO: mawusix/devstandards-hub
+      USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.CI_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.21.4
+
+      # WHY captured before rolling back: this is the ONLY point at which the
+      # about-to-be-replaced (bad) release's Deployment is still live. `helm rollback`
+      # overwrites it in the next step, so both the image digest AND the
+      # devstandards.io/commit-sha annotation (deploy.yml's fallback provenance source
+      # — see the provenance step below) have to be read now or not at all.
+      - name: Capture currently-deployed (bad) release info
+        id: bad
+        run: |
+          digest=$(kubectl get deployment "$RELEASE" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          commit_sha=$(kubectl get deployment "$RELEASE" -n "$NAMESPACE" \
+            -o jsonpath='{.metadata.annotations.devstandards\.io/commit-sha}')
+          echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+
+      # WHY `helm rollback` with no explicit revision number: the default targets the
+      # immediately preceding revision, i.e. "one step back" — the same "previous
+      # known-good" semantics as the brief asks for. `helm history` right after is the
+      # audit trail: what this release's revision list looked like at the moment of
+      # rollback, independent of anything derived below.
+      - name: helm rollback
+        run: |
+          helm rollback "$RELEASE" -n "$NAMESPACE" --wait --timeout 5m
+          helm history "$RELEASE" -n "$NAMESPACE"
+
+      - name: Capture restored (good) release info
+        id: good
+        run: |
+          digest=$(kubectl get deployment "$RELEASE" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          commit_sha=$(kubectl get deployment "$RELEASE" -n "$NAMESPACE" \
+            -o jsonpath='{.metadata.annotations.devstandards\.io/commit-sha}')
+          version=$(kubectl get deployment "$RELEASE" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.metadata.labels.app\.kubernetes\.io/version}')
+          {
+            echo "digest=${digest#*@}"
+            echo "commit_sha=$commit_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      # WHY this exists on rollback at all — same purpose as deploy.yml's identical
+      # check: confirming the release now serving traffic actually came through the
+      # release process. WHY it warns instead of blocking, unlike deploy.yml: deploy is
+      # a planned action where refusing to proceed is cheap and correct; rollback is a
+      # recovery action, and the image being rolled back TO is whatever was already
+      # serving traffic before the bad release — refusing to restore it because it
+      # predates this tagging convention (or lost its tag to an Artifact Registry
+      # cleanup policy) would let a process control cause an outage. Controls on the
+      # way in should be strict; controls on the way back should be permissive.
+      - name: Check rollback target is semver-tagged (non-blocking)
+        id: guard
+        if: env.NAMESPACE == 'pre' || env.NAMESPACE == 'prod'
+        run: |
+          tags=$(gcloud artifacts docker tags list "$IMAGE_REPOSITORY" \
+            --filter="version:${{ steps.good.outputs.digest }}" \
+            --format="value(tag.basename())")
+          if grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags"; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Rollback target ${{ steps.good.outputs.digest }} in $NAMESPACE has no semver tag (X.Y.Z) in Artifact Registry. Restoring service takes priority over the tagging convention here — the rollback already completed regardless."
+            echo "result=warn" >> "$GITHUB_OUTPUT"
+            {
+              echo "### :warning: Rollback target is not semver-tagged"
+              echo
+              echo "\`${{ steps.good.outputs.digest }}\` (now running in \`$NAMESPACE\`) has no \`X.Y.Z\`"
+              echo "tag in Artifact Registry. The rollback above already completed regardless — this"
+              echo "is informational only."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/"$RELEASE" -n "$NAMESPACE" --timeout=60s
+          kubectl get pods -n "$NAMESPACE" -o wide
+
+      - name: Setup oras
+        uses: oras-project/setup-oras@v1
+
+      # WHY two-tier resolution, OCI annotation first then the Deployment's own
+      # fallback annotation: the OCI org.opencontainers.image.revision annotation on
+      # the image manifest is PRIMARY because it's baked into the artefact at build
+      # time by the app repo — it travels with the image and survives the Helm release
+      # being deleted or the namespace recreated. It doesn't exist yet (the app repo's
+      # build pipeline hasn't been updated to set it), which is exactly what the
+      # FALLBACK covers: deploy.yml already stamps devstandards.io/commit-sha onto the
+      # Deployment itself at deploy time (see templates/deployment.yaml), captured
+      # above for both the bad and good release before either digest disappears. "the
+      # chart's own default 'unknown'" (when neither the workflow input nor payload
+      # carried a commit SHA at deploy time) is treated the same as "unresolved", not
+      # as a real value. Best-effort throughout: `|| true` and the `2>/dev/null` on
+      # oras mean a missing/unreadable annotation resolves to an empty string rather
+      # than failing the job — the rollback itself already succeeded above and must
+      # never be undone by a provenance lookup failing.
+      - name: Resolve image digests to commit SHAs
+        id: provenance
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+          resolve() {
+            local digest="$1" fallback="$2" sha
+            sha=$(oras manifest fetch --output - "${IMAGE_REPOSITORY}@${digest}" 2>/dev/null \
+              | jq -r '.annotations["org.opencontainers.image.revision"] // empty')
+            if [[ -z "$sha" && "$fallback" != "unknown" ]]; then
+              sha="$fallback"
+            fi
+            echo "$sha"
+          }
+
+          bad_sha=$(resolve "${{ steps.bad.outputs.digest }}" "${{ steps.bad.outputs.commit_sha }}" || true)
+          good_sha=$(resolve "${{ steps.good.outputs.digest }}" "${{ steps.good.outputs.commit_sha }}" || true)
+
+          [[ -z "$bad_sha" ]] && echo "::warning::Could not resolve a commit SHA for the rolled-back-FROM digest (${{ steps.bad.outputs.digest }}) via either the image's OCI annotation or the Deployment's fallback annotation."
+          [[ -z "$good_sha" ]] && echo "::warning::Could not resolve a commit SHA for the rolled-back-TO digest (${{ steps.good.outputs.digest }}) via either the image's OCI annotation or the Deployment's fallback annotation."
+
+          echo "bad_sha=$bad_sha" >> "$GITHUB_OUTPUT"
+          echo "good_sha=$good_sha" >> "$GITHUB_OUTPUT"
+
+      # WHY a GitHub App installation token, not a PAT: `gh issue create --repo
+      # devstandards-hub` needs Issues:write and `gh api .../compare` needs
+      # Contents:read on a DIFFERENT repo than this workflow runs in — the default
+      # GITHUB_TOKEN is scoped only to devstandards-hub-infra and can't reach it. A
+      # token minted here from the devstandards-hub-dispatch App is scoped to exactly
+      # the one repo (via `repositories:` below) and exactly the permissions the App
+      # was granted, and expires within the hour — no long-lived PAT sitting in
+      # repo secrets tied to a human account.
+      - name: Mint installation token for the app repo
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DISPATCH_APP_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: mawusix
+          repositories: devstandards-hub
+
+      # WHY an ISSUE in the app repo, not a PR reverting a specific commit: the pipeline
+      # cannot know WHICH commit caused the failure — several may have merged to main
+      # since the last known-good release, and a health-check-triggered rollback has no
+      # way to attribute the failure to one of them. Automating detection and
+      # notification (which commits are in the suspect range, flagged to a human
+      # promptly) is safe; automating remediation (picking one commit and asserting
+      # it's the cause, then reverting it) is not — that requires knowing the cause,
+      # which a failed rollout alone doesn't establish. If provenance couldn't be
+      # resolved for either digest, the issue says so explicitly rather than silently
+      # omitting the suspect list — the rollback has already restored service either
+      # way (see the `helm rollback` step above, which already ran).
+      - name: Open GitHub issue with suspect commits
+        id: issue
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BAD_DIGEST: ${{ steps.bad.outputs.digest }}
+          GOOD_DIGEST: ${{ steps.good.outputs.digest }}
+          BAD_SHA: ${{ steps.provenance.outputs.bad_sha }}
+          GOOD_SHA: ${{ steps.provenance.outputs.good_sha }}
+        run: |
+          {
+            echo "\`$NAMESPACE\` was rolled back by [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            echo
+            echo "\`main\` in this repo and what's actually running in \`$NAMESPACE\` have diverged:"
+            echo "the code currently on \`main\` may still contain whatever caused this rollback."
+            echo "This issue only lists candidates — diagnosing which commit (if any) is"
+            echo "actually at fault, and whether to revert it, is left to a human."
+            echo
+            echo "| | digest | commit |"
+            echo "|---|---|---|"
+            echo "| rolled back FROM (bad) | \`$BAD_DIGEST\` | ${BAD_SHA:-_unresolved_} |"
+            echo "| rolled back TO (good)  | \`$GOOD_DIGEST\` | ${GOOD_SHA:-_unresolved_} |"
+            echo
+            if [[ -n "$BAD_SHA" && -n "$GOOD_SHA" && "$BAD_SHA" != "$GOOD_SHA" ]]; then
+              echo "Suspect commits (\`$GOOD_SHA\`...\`$BAD_SHA\`):"
+              echo
+              gh api "repos/$APP_REPO/compare/$GOOD_SHA...$BAD_SHA" \
+                --jq '.commits[] | "- " + .sha[0:7] + " " + (.commit.message | split("\n")[0]) + " (" + .commit.author.name + ")"'
+            else
+              echo "Commit provenance could not be resolved for one or both digests — neither the"
+              echo "image's \`org.opencontainers.image.revision\` OCI annotation nor the Deployment's"
+              echo "\`devstandards.io/commit-sha\` fallback annotation had a usable value — so no"
+              echo "suspect commit range could be computed. The rollback above already completed"
+              echo "regardless."
+            fi
+          } > issue_body.md
+
+          url=$(gh issue create --repo "$APP_REPO" \
+            --title "Rollback in $NAMESPACE — main may still contain the cause" \
+            --body-file issue_body.md)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # WHY this reports the restored version/digest regardless of the promotion-guard
+      # result above: the rollback already happened either way — a missing semver tag
+      # is a warning about the release process, not a reason to hide what's now
+      # actually running.
+      - name: Summary
+        run: |
+          {
+            echo "### Rolled back \`$RELEASE\` in \`$NAMESPACE\`"
+            echo
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| restored version | \`${{ steps.good.outputs.version }}\` |"
+            echo "| restored digest | \`${{ steps.good.outputs.digest }}\` |"
+            echo "| rolled back from digest | \`${{ steps.bad.outputs.digest }}\` |"
+            echo "| promotion guard (restored release) | \`${{ steps.guard.outputs.result || 'n/a (int)' }}\` |"
+            echo "| suspect-commit issue | ${{ steps.issue.outputs.url }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

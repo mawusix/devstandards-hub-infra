@@ -1,0 +1,17 @@
+# pre — namespace "pre" in the single shared cluster. Deployed by hand via
+# workflow_dispatch, behind the `pre` GitHub Environment gate. Exists to exercise the
+# same scaling/HPA/PDB behaviour prod will see, at prod-like traffic, before anything
+# reaches prod.
+replicaCount: 1
+
+# WHY HPA on here, unlike int: pre exists specifically to catch autoscaling
+# misconfiguration (a bad CPU target, HPA/PDB interaction during a rollout) before
+# prod does — leaving it off here would mean HPA behaviour is first observed in prod.
+autoscaling:
+  enabled: true
+
+# WHY no ingress: see values-prod.yaml for the full reasoning. Reach this environment
+# with:
+#   kubectl port-forward -n pre svc/devstandards-hub 8080:80
+ingress:
+  enabled: false

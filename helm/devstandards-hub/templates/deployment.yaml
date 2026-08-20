@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "devstandards-hub.fullname" . }}
+  labels:
+    {{- include "devstandards-hub.labels" . | nindent 4 }}
+  # WHY these two annotations, on the Deployment itself rather than only in CI logs:
+  # they make `kubectl describe deployment` self-documenting — commit-sha ties the
+  # running Pods back to the exact source that produced them, image-digest is the same
+  # value already visible in the container spec below, repeated here so it shows up in
+  # `kubectl describe`'s Annotations block without having to dig into the Pod spec.
+  # commit-sha falls back to "unknown" if the deploy that created this revision didn't
+  # supply one (a manual workflow_dispatch deploy may omit it) — this is also the
+  # FALLBACK source rollback.yml's provenance lookup reads if the image manifest's own
+  # OCI annotation isn't set yet by the app repo's build.
+  annotations:
+    devstandards.io/commit-sha: {{ .Values.commitSha | default "unknown" | quote }}
+    devstandards.io/image-digest: {{ .Values.image.digest | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # WHY maxUnavailable 0 / maxSurge 1: a rolling update never drops below the current
+  # replica count (no Pod is torn down before its replacement is up and Ready), it only
+  # ever adds one extra Pod above it at a time. For int/pre (1 replica) this is what
+  # makes a zero-downtime rollout possible at all; for prod (2 replicas) it keeps full
+  # capacity throughout the rollout instead of briefly dropping to 1.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "devstandards-hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "devstandards-hub.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: devstandards-hub
+          # WHY referenced by digest (repository@sha256:...), never by a tag: a tag is
+          # a mutable pointer that can be repointed at different bytes after the fact;
+          # a digest is a content hash and cannot be. Pinning to the digest means
+          # "promote this image from int to pre to prod" provably deploys the exact
+          # same bytes that were built and tested once, in every environment (build
+          # once, deploy many) — rather than trusting that a tag like `:latest` still
+          # points at what was actually tested by the time it's pulled.
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # WHY requests == limits despite being small: see values.yaml's `resources`
+          # comment — Autopilot rounds requests up to its own per-workload-class
+          # minimums regardless of what's requested here, so these values communicate
+          # intent (a lightweight static-file server) without under- or
+          # over-provisioning relative to what Autopilot actually bills for.
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # WHY this exact securityContext: runAsNonRoot + runAsUser 101 matches the
+          # nginx-unprivileged image's own `nginx` user, which cannot bind port 80 —
+          # exactly why this container listens on 8080 instead (see the port above),
+          # and it rules out ever running as root even if the base image changed to
+          # allow it. readOnlyRootFilesystem removes an entire class of attack (writing
+          # to the container's own filesystem) for an app that never needs to write to
+          # it. allowPrivilegeEscalation: false and dropping every Linux capability
+          # remove privileges a static file server never needs in the first place.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # WHY these two emptyDirs are REQUIRED, not optional hardening: with
+            # readOnlyRootFilesystem: true, Nginx cannot write anywhere on its own
+            # filesystem — but it always needs to write its cache/proxy-temp files
+            # under /var/cache/nginx, and (for the common nginx-unprivileged image) its
+            # pid file under /tmp. Without these two writable emptyDirs mounted over
+            # those exact paths, Nginx fails to start the instant
+            # readOnlyRootFilesystem is turned on.
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

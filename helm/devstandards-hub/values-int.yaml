@@ -1,0 +1,18 @@
+# int — namespace "int" in the single shared cluster. Deployed automatically on every
+# `app-image-published` repository_dispatch from the app repo (see
+# ../../.github/workflows/deploy.yml) with NO human approval gate. This is the "does
+# the new image even boot" smoke-test environment, not a production or
+# pre-production surface — pre and prod are always deployed by hand instead.
+replicaCount: 1
+
+# WHY HPA off: one replica is already the floor `autoscaling.minReplicas` would set
+# anyway; autoscaling has nothing to add to an environment that exists purely to catch
+# a broken image before pre/prod ever see it.
+autoscaling:
+  enabled: false
+
+# WHY no ingress: see values-prod.yaml for the full reasoning (one reserved static IP,
+# one environment gets it). Reach this environment with:
+#   kubectl port-forward -n int svc/devstandards-hub 8080:80
+ingress:
+  enabled: false

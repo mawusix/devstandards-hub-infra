@@ -1,0 +1,208 @@
+name: Deploy
+
+# WHY two triggers into one job instead of two separate workflows: they do exactly the
+# same thing (helm upgrade --install with a given digest, to a given namespace) — the
+# only difference is where the environment/digest/version come from. Branching that
+# into two workflow files would duplicate every auth/helm/rollout step and risk the two
+# copies drifting apart.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [int, pre, prod]
+      image_digest:
+        description: "Full image digest to deploy, e.g. sha256:<64 hex chars>"
+        required: true
+        type: string
+      version:
+        description: "Semver shown in the app.kubernetes.io/version label (informational only)"
+        required: false
+        type: string
+        default: "0.0.0-manual"
+      # WHY optional, unlike image_digest: a manual deploy may be run by someone
+      # promoting a digest they only have in hand (e.g. copied from a previous run's
+      # summary) without the originating commit SHA to hand — this must never block a
+      # deploy. Left blank, the Deployment annotation falls back to "unknown" (see
+      # helm/devstandards-hub/templates/deployment.yaml) and rollback.yml's provenance
+      # lookup falls further back to the OCI annotation on the image itself.
+      commit_sha:
+        description: "Commit SHA that produced this image, for the devstandards.io/commit-sha annotation (optional)"
+        required: false
+        type: string
+        default: ""
+  # WHY this always deploys to int, with no environment field in the payload at all:
+  # the app repo's publish pipeline (out of scope here) fires this the moment a new
+  # image is pushed — before any human has looked at it. int is the smoke-test
+  # namespace with no approval gate (see helm/devstandards-hub/values-int.yaml); pre
+  # and prod are always promoted deliberately, by hand, via workflow_dispatch above.
+  #
+  # Expected payload:
+  #   { "image_digest": "sha256:<64 hex chars>", "version": "1.4.2", "commit_sha": "<git sha>" }
+  repository_dispatch:
+    types: [app-image-published]
+
+# WHY id-token: write, no more: this is exactly what google-github-actions/auth needs
+# to mint a WIF token for ci-infra-sa — the same identity terraform-plan.yml/
+# terraform-apply.yml already use, federated from this repo (see bootstrap/iam.tf).
+# ci-infra-sa already holds roles/container.admin on the project, which GKE maps to
+# full Kubernetes API access on every cluster in it — no extra IAM or RBAC setup is
+# needed for this workflow to run kubectl/helm.
+permissions:
+  contents: read
+  id-token: write
+
+# WHY keyed on environment, cancel-in-progress FALSE: two deploys to the same
+# environment racing each other (e.g. a manual prod deploy while a prior one is still
+# --wait-ing) must queue, not interrupt — cancelling mid-`helm upgrade` can leave a
+# release stuck mid-rollout. A deploy to int and a deploy to prod are unrelated and
+# should NOT block each other, hence keying on environment rather than one global
+# group.
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'int' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # WHY this expression: workflow_dispatch always carries inputs.environment;
+    # repository_dispatch never does (client_payload only carries digest/version), so
+    # it falls through to 'int'. Whichever value this resolves to is also the
+    # Environment name whose required-reviewers gate (configured in Settings >
+    # Environments, not here — same pattern as terraform-apply.yml's `platform`
+    # Environment) GitHub applies BEFORE any step below runs.
+    environment: ${{ github.event.inputs.environment || 'int' }}
+    env:
+      PROJECT_ID: devops-bpp
+      REGION: europe-west2
+      CLUSTER_NAME: devstandards-hub
+      NAMESPACE: ${{ github.event.inputs.environment || 'int' }}
+      RELEASE: devstandards-hub
+      IMAGE_REPOSITORY: europe-west2-docker.pkg.dev/devops-bpp/devstandards-hub
+      IMAGE_DIGEST: ${{ github.event.inputs.image_digest || github.event.client_payload.image_digest }}
+      APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version || '0.0.0-unknown' }}
+      COMMIT_SHA: ${{ github.event.inputs.commit_sha || github.event.client_payload.commit_sha || '' }}
+      # WHY required for `gcloud container clusters get-credentials` to write a
+      # kubeconfig that actually works: since gke-gcloud-auth-plugin became mandatory
+      # (Kubernetes client-go dropped built-in GCP auth), kubectl/helm authenticate via
+      # an exec plugin that only activates when this is set.
+      USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # WHY this runs before any GCP auth or cluster access: fail fast and cheaply on a
+      # malformed input, instead of authenticating, connecting to the cluster, and only
+      # then having `helm upgrade` reject it deep in a --atomic rollout.
+      - name: Validate image digest
+        run: |
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::image_digest '$IMAGE_DIGEST' does not match ^sha256:[a-f0-9]{64}\$ — refusing to deploy."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.CI_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      # WHY this guard exists, and only for pre/prod: int deliberately receives every
+      # published image — including ephemeral pr-* build artefacts that have never
+      # been through a release process — untagged and ungated (see the
+      # repository_dispatch comment above). pre/prod are promotions: a mistyped or
+      # pasted digest must not be able to place an unreleased build in a
+      # production-eligible environment. Checking Artifact Registry's own tags on the
+      # digest (rather than trusting the `version` input string, which is never
+      # cross-checked against anything) ties the check to something provably
+      # associated with the image, not just typed in alongside it.
+      #
+      # WHY this blocks (unlike rollback.yml's identical-looking check, which warns):
+      # deploy is a planned action — refusing to proceed here is cheap and correct, and
+      # forces a deliberate release tag to exist before anything reaches pre/prod.
+      # Controls on the way in should be strict; see rollback.yml for why the same
+      # check must be permissive on the way back out during a recovery.
+      - name: Verify pre/prod promotion is semver-tagged
+        if: env.NAMESPACE == 'pre' || env.NAMESPACE == 'prod'
+        run: |
+          tags=$(gcloud artifacts docker tags list "$IMAGE_REPOSITORY" \
+            --filter="version:${IMAGE_DIGEST}" \
+            --format="value(tag.basename())")
+          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags"; then
+            echo "::error::digest $IMAGE_DIGEST has no semver tag (X.Y.Z) in Artifact Registry — refusing to deploy to $NAMESPACE. Only images that have been through the release process (tagged X.Y.Z) may be promoted to pre/prod."
+            exit 1
+          fi
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$REGION" --project "$PROJECT_ID"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.21.4
+
+      # WHY --create-namespace here rather than a Namespace resource created by
+      # Terraform: creating it here avoids configuring a kubernetes/helm Terraform
+      # provider against a cluster created in that same Terraform run (the exact
+      # chicken-and-egg problem platform/README.md documents for why platform/ never
+      # touches Kubernetes objects at all) — namespace lifecycle for int/pre/prod is
+      # entirely this workflow's concern, not Terraform's.
+      #
+      # WHY --atomic --timeout 5m: if the rollout doesn't reach Ready within 5 minutes
+      # (bad probe, crashloop, etc.), Helm automatically rolls the release back to its
+      # last good revision itself — the step below exists purely to make that
+      # auto-rollback visible in the log rather than a silent no-op.
+      #
+      # WHY --history-max 10: bounds how many old ReplicaSets/revisions Helm keeps
+      # around per release, so `helm rollback` always has recent history to target
+      # without revisions accumulating forever.
+      - name: helm upgrade --install
+        run: |
+          helm upgrade --install "$RELEASE" helm/devstandards-hub \
+            --namespace "$NAMESPACE" --create-namespace \
+            -f "helm/devstandards-hub/values-${NAMESPACE}.yaml" \
+            --set image.digest="$IMAGE_DIGEST" \
+            --set app.version="$APP_VERSION" \
+            --set commitSha="$COMMIT_SHA" \
+            --wait --atomic --timeout 5m --history-max 10
+
+      # WHY `if: failure()`: only runs when the step above failed — i.e. --atomic just
+      # auto-rolled back. `helm upgrade` on its own gives no indication in the log that
+      # this happened; dumping history + pod state here, behind an explicit ::error::,
+      # is what turns a silent auto-rollback into something a human reviewing the run
+      # actually notices.
+      - name: Diagnose failed deploy (atomic rollback)
+        if: failure()
+        run: |
+          echo "::error::helm upgrade failed and --atomic rolled '$RELEASE' back in namespace '$NAMESPACE'. Dumping history and pod state for diagnosis."
+          helm history "$RELEASE" -n "$NAMESPACE" || true
+          kubectl get pods -n "$NAMESPACE" -o wide || true
+          kubectl describe pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$RELEASE" || true
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/"$RELEASE" -n "$NAMESPACE" --timeout=60s
+          kubectl get pods -n "$NAMESPACE" -o wide
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed \`$RELEASE\` to \`$NAMESPACE\`"
+            echo
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| version | \`$APP_VERSION\` |"
+            echo "| digest | \`$IMAGE_DIGEST\` |"
+            echo "| commit | \`${COMMIT_SHA:-unknown}\` |"
+            echo "| triggered by | \`${{ github.event_name }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: devstandards-hub
+description: >-
+  Static React SPA (served by Nginx) for the devstandards-hub project. One chart,
+  deployed as three independent Helm releases (one per int/pre/prod namespace) into
+  the single shared GKE Autopilot cluster provisioned by ../../platform. See the repo
+  root README.md for the digest-promotion model and the deploy/rollback workflows.
+type: application
+
+# WHY this stays independent of app.version / image.digest in values.yaml: this is the
+# CHART's own version (bump it when templates/values structure changes), not the
+# application's. The two are deliberately decoupled — a chart change and an app release
+# are different events with different blast radii.
+version: 0.1.0
+appVersion: "0.1.0"
