@@ -1,0 +1,140 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+
+# WHY no `environment:` here: a GitHub Environment gate means "someone must click
+# approve before this runs" — appropriate for terraform-apply.yml's apply step, wrong
+# for a plan. A plan makes no changes to real infrastructure, and reviewers need to see
+# its output (posted as a PR comment below) *before* they can sensibly decide whether to
+# approve the apply. Gating the plan itself would make it impossible to review what
+# you're approving.
+permissions:
+  contents: read
+  id-token: write # required for google-github-actions/auth to mint a WIF token
+  pull-requests: write # required to post/update the plan comment
+
+# WHY keyed on the PR number, cancel-in-progress true: a plan is read-only and cheap to
+# re-run, so a new push to the same PR should cancel whatever plan is still running for
+# an older commit rather than queue behind it — the old plan's output would be stale by
+# the time it finished anyway.
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # WHY ci-infra-sa via WIF, no key: this is exactly the identity bootstrap/iam.tf
+      # created for this repo. No service account key ever exists to leak.
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.CI_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8" # matches the >= 1.9 floor in versions.tf
+
+      # WHY -recursive from the repo root (not the `platform` default working-directory
+      # above): modules/ has no root module of its own to `init`/`plan`, but its .tf
+      # files still need to be format-checked and linted alongside platform/.
+      - name: Terraform fmt check (whole repo)
+        working-directory: .
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Setup tflint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint (whole repo)
+        working-directory: .
+        run: tflint --recursive
+
+      # WHY --soft-fail combined with --hard-fail-on HIGH,CRITICAL, not --soft-fail
+      # alone or omitted entirely: --soft-fail on its own would report findings without
+      # ever failing the job, at any severity — a HIGH/CRITICAL misconfiguration (e.g. a
+      # public bucket, an overly-broad IAM binding) would merge silently. --hard-fail-on
+      # HIGH,CRITICAL makes the job fail specifically for those, while --soft-fail keeps
+      # LOW/MEDIUM findings visible in the log without blocking the PR on style-level
+      # issues.
+      - name: Checkov
+        working-directory: .
+        run: |
+          python3 -m pip install --quiet checkov
+          checkov --directory . --compact --quiet --soft-fail --hard-fail-on HIGH,CRITICAL
+
+      - name: Terraform plan
+        id: plan
+        run: terraform plan -no-color -input=false
+        continue-on-error: true
+
+      # WHY a sticky, upserted comment instead of a new one per push: a PR that goes
+      # through several pushes would otherwise accumulate one plan comment per push,
+      # burying the review thread. Finding-and-editing the previous bot comment (marked
+      # by the hidden HTML comment below) keeps exactly one, always-current plan comment
+      # per PR.
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        env:
+          PLAN: "${{ steps.plan.outputs.stdout }}${{ steps.plan.outputs.stderr }}"
+        with:
+          script: |
+            const marker = "<!-- terraform-plan -->";
+            const outcome = "${{ steps.plan.outcome }}";
+            const plan = process.env.PLAN || "(no output)";
+            const body = `${marker}
+            ### Terraform Plan (\`platform/\`)
+
+            Outcome: \`${outcome}\`
+
+            <details><summary>Show plan</summary>
+
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+
+            </details>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

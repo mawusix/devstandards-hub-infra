@@ -1,0 +1,15 @@
+# Terraform state - local backend here, and it can contain secrets in plaintext
+*.tfstate
+*.tfstate.*
+
+# Local terraform working directory (provider binaries, cached modules)
+.terraform/
+
+# Ignore override files as they may contain sensitive data, such as passwords or private keys
+*.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+.DS_Store

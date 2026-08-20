@@ -1,0 +1,52 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # required for google-github-actions/auth to mint a WIF token
+
+# WHY cancel-in-progress is FALSE here (unlike terraform-plan.yml): cancelling a
+# `terraform apply` mid-run can leave real infrastructure half-created/half-updated and
+# state that no longer matches either the old or the new config. A second push to main
+# while an apply is running must queue behind it, not interrupt it.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    # WHY the `platform` GitHub Environment: this is the actual approval gate for
+    # applying real infrastructure changes — required reviewers and "prevent
+    # self-review" are configured on the Environment itself (Settings > Environments >
+    # platform), not in this workflow file, so they can be changed without a code
+    # change. A run against this job pauses for approval before the auth/apply steps
+    # below ever execute.
+    environment: platform
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.CI_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8" # matches the >= 1.9 floor in versions.tf
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        run: terraform apply -auto-approve -input=false
