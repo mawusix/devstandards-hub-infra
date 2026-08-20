@@ -7,6 +7,7 @@
 
 # Ignore override files as they may contain sensitive data, such as passwords or private keys
 *.tfvars
+tfplan
 
 # Crash logs
 crash.log
